@@ -1,0 +1,157 @@
+name: Build rust for macOS 10.4+
+on:
+  push:
+  schedule:
+    - cron: '0 0 * * *'
+jobs:
+  build:
+    runs-on: macos-10.15
+
+    timeout-minutes: 0
+
+    steps:
+    - name: Make sure Xcode 12.4 is used on macOS 10.15 as the default /Application/Xcode.app
+      shell: bash
+      run: |
+        sudo mv /Applications/Xcode.app /Applications/Xcode.app-
+        sudo ln -s /Applications/Xcode_12.4.app /Applications/Xcode.app
+        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+    - name: Install ninja
+      run: brew install ninja
+
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Checkout rust
+      uses: actions/checkout@v2
+      with:
+        repository: rust-lang/rust
+        path: rust
+        submodules: recursive
+
+    - name: Pathcing LLVM
+      run: |
+        patch -p1 -d rust/src/llvm-project < switch-to-emulated-TLV-on-macOS.patch
+
+    - name: Pathcing rust
+      run: |
+        curl -L https://github.com/rust-lang/rust/compare/master...catap:legacy-macOS.patch | patch -p1 -d rust
+
+    - name: Configure LLVM
+      run: |
+        cmake -S ${GITHUB_WORKSPACE}/rust/src/llvm-project/llvm -B ${GITHUB_WORKSPACE}/llvm-build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/llvm-dist \
+          -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+          -DLLVM_TARGETS_TO_BUILD=X86 \
+          -DLLVM_INCLUDE_UTILS=ON \
+          -DLIBCXX_ENABLE_SHARED=ON \
+          -DLIBCXX_INSTALL_LIBRARY=ON \
+          -DCMAKE_BUILD_WITH_INSTALL_RPATH:BOOL=OFF \
+          -DCLANG_INCLUDE_TESTS=OFF  \
+          -DCLANG_ENABLE_STATIC_ANALYZER=OFF\
+          -DCLANG_ENABLE_ARCMT=OFF \
+          -DDARWIN_PREFER_PUBLIC_SDK=ON \
+          -DLLVM_BUILD_RUNTIME=ON \
+          -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;compiler-rt;libcxx;libcxxabi;libunwind;lld;mlir"
+
+    - name: Build LLVM
+      run: |
+        cmake --build ${GITHUB_WORKSPACE}/llvm-build
+
+    - name: Install LLVM
+      run: |
+        cmake --install ${GITHUB_WORKSPACE}/llvm-build
+
+    - name: Extract static libs
+      id: static_libs
+      run: |
+        set -x
+        export THIN_LIB_CLANG_RT_DIR=${GITHUB_WORKSPACE}/lib
+
+        mkdir -p ${THIN_LIB_CLANG_RT_DIR}
+
+        lipo -thin x86_64 -output ${THIN_LIB_CLANG_RT_DIR}/libclang_rt.a $(find ${GITHUB_WORKSPACE}/llvm-dist -iname libclang_rt.osx.a | head -n 1)
+
+        export LIB_UNWIND_DIR=$(dirname $(find ${GITHUB_WORKSPACE}/llvm-dist -iname libunwind.a | head -n 1))
+
+        echo "::set-output name=clang_rt::${THIN_LIB_CLANG_RT_DIR}"
+        echo "::set-output name=unwind::${LIB_UNWIND_DIR}"
+
+    - name: Configure rust
+      run: |
+        cd rust
+        ./configure \
+        --llvm-filecheck=${GITHUB_WORKSPACE}/llvm-build/bin/FileCheck \
+        --llvm-root=${GITHUB_WORKSPACE}/llvm-dist \
+        --build=x86_64-apple-darwin \
+        --host=x86_64-apple-darwin \
+        --target=x86_64-apple-darwin \
+        --set=target.x86_64-apple-darwin.crt-static=true \
+        --set=target.x86_64-apple-darwin.cc=${GITHUB_WORKSPACE}/llvm-dist/bin/clang \
+        --set=target.x86_64-apple-darwin.cxx=${GITHUB_WORKSPACE}/llvm-dist/bin/clang \
+        --set=target.x86_64-apple-darwin.linker=${GITHUB_WORKSPACE}/llvm-dist/bin/clang \
+        --set=target.x86_64-apple-darwin.ar=${GITHUB_WORKSPACE}/llvm-dist/bin/llvm-ar \
+        --set=target.x86_64-apple-darwin.ranlib=${GITHUB_WORKSPACE}/llvm-dist/bin/ranlib
+
+    - name: Dump rust config
+      run: cat -n rust/config.toml
+
+    - name: Determent paths
+      id: paths
+      run: |
+        export SDK_PATH=$(xcrun --show-sdk-path)
+
+        echo "::set-output name=sdk::${SDK_PATH}"
+
+    - name: Build rust stage 1for local platform
+      run: |
+        cd rust
+        ./x.py build --stage 2
+      env:
+        CPATH: ${{ steps.paths.outputs.sdk }}/usr/include
+        LIBRARY_PATH: ${{ steps.paths.outputs.sdk }}/usr/lib
+        RUSTC_STATIC_CLANG_RT_PATH: ${{ steps.static_libs.outputs.clang_rt }}
+        RUSTC_STATIC_UNWIND_PATH: ${{ steps.static_libs.outputs.unwind }}
+
+    - name: Build rust dist for target platforms
+      run: |
+        cd rust
+        ./x.py dist --keep-stage 0 --keep-stage 1
+      env:
+        CPATH: ${{ steps.paths.outputs.sdk }}/usr/include
+        LIBRARY_PATH: ${{ steps.paths.outputs.sdk }}/usr/lib
+        RUSTC_STATIC_CLANG_RT_PATH: ${{ steps.static_libs.outputs.clang_rt }}
+        RUSTC_STATIC_UNWIND_PATH: ${{ steps.static_libs.outputs.unwind }}
+        MACOSX_DEPLOYMENT_TARGET: 10.4
+
+    - name: Upload dist
+      uses: actions/upload-artifact@v2
+      with:
+        name: dist
+        path: rust/build/dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.head_ref == 'master' }}
+    steps:
+      - name: Fetch artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: dist
+          path: dist
+
+      - name: Create tag
+        id: create_tag
+        run: |
+          tag=build-$(date +%Y%m%d-%H%M%S)
+          echo "::set-output name=tag::$tag"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ${{ steps.create_tag.outputs.tag }}
+          tag_name: ${{ steps.create_tag.outputs.tag }}
+          files: dist/*

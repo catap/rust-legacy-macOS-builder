@@ -1,0 +1,49 @@
+Based on https://reviews.llvm.org/D115250
+---
+ clang/lib/Basic/Targets/OSTargets.h | 2 +-
+ clang/lib/CodeGen/ItaniumCXXABI.cpp | 4 +++-
+ llvm/include/llvm/ADT/Triple.h      | 4 +++-
+ 3 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/clang/lib/Basic/Targets/OSTargets.h b/clang/lib/Basic/Targets/OSTargets.h
+index 3c1830d5f8e8..bdeca50f5c60 100644
+--- a/clang/lib/Basic/Targets/OSTargets.h
++++ b/clang/lib/Basic/Targets/OSTargets.h
+@@ -91,7 +91,7 @@ public:
+     this->TLSSupported = false;
+ 
+     if (Triple.isMacOSX())
+-      this->TLSSupported = !Triple.isMacOSXVersionLT(10, 7);
++      this->TLSSupported = !Triple.isMacOSXVersionLT(10, 4);
+     else if (Triple.isiOS()) {
+       // 64-bit iOS supported it from 8 onwards, 32-bit device from 9 onwards,
+       // 32-bit simulator from 10 onwards.
+diff --git a/clang/lib/CodeGen/ItaniumCXXABI.cpp b/clang/lib/CodeGen/ItaniumCXXABI.cpp
+index 2730b5bfc5c0..38246b373931 100644
+--- a/clang/lib/CodeGen/ItaniumCXXABI.cpp
++++ b/clang/lib/CodeGen/ItaniumCXXABI.cpp
+@@ -2580,7 +2580,7 @@ static void emitGlobalDtorWithCXAAtExit(CodeGenFunction &CGF,
+   const char *Name = "__cxa_atexit";
+   if (TLS) {
+     const llvm::Triple &T = CGF.getTarget().getTriple();
+-    Name = T.isOSDarwin() ?  "_tlv_atexit" : "__cxa_thread_atexit";
++    Name = "__cxa_thread_atexit";
+   }
+ 
+   // We're assuming that the destructor function is something we can
+diff --git a/llvm/include/llvm/ADT/Triple.h b/llvm/include/llvm/ADT/Triple.h
+index 5dbd4f16bfd5..83b15bae8250 100644
+--- a/llvm/include/llvm/ADT/Triple.h
++++ b/llvm/include/llvm/ADT/Triple.h
+@@ -819,7 +819,7 @@ public:
+ 
+   /// Tests whether the target uses emulated TLS as default.
+   bool hasDefaultEmulatedTLS() const {
+-    return isAndroid() || isOSOpenBSD() || isWindowsCygwinEnvironment();
++    return isAndroid() || isOSOpenBSD() || isWindowsCygwinEnvironment() || isMacOSX();
+   }
+ 
+   /// Tests whether the target uses -data-sections as default.
+-- 
+2.34.1
+
